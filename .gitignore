@@ -1,0 +1,11 @@
+# 데이터
+*.csv
+*.xlsx
+*.dcm
+*.json
+*.zip
+*.png
+
+# 체크포인트
+/checkpoint/
+/__pycache__/
