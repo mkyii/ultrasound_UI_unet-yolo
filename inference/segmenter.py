@@ -25,11 +25,14 @@ def unet_from_yolo_detections(
     device,
     args
 ):
-    """  
-    YOLO 검출 결과를 입력으로 받아 각 bbox crop에 대해 UNet segmentation을 수행.
-    """ 
     H, W = frame_bgr.shape[:2]
     final_mask = np.zeros((H, W), dtype=np.uint8)
+
+    if len(det_info) == 0:
+        return final_mask
+
+    crop_tensors = []
+    crop_meta = []
 
     for det in det_info:
         cls = det["class"]
@@ -48,12 +51,29 @@ def unet_from_yolo_detections(
             device=device
         )
 
-        pred = unet_model(crop_tensor)
-        prob = torch.sigmoid(pred)
-        pred_mask = (prob > args.unet_threshold).float()
-        pred_mask = pred_mask[0, 0].cpu().numpy().astype(np.uint8)
+        crop_tensors.append(crop_tensor)
 
-        # crop 기준 mask를 원본 bbox 크기로 복원한다. label mask이므로 nearest interpolation을 사용
+        crop_meta.append({
+            "class": cls,
+            "box": [x1, y1, x2, y2],
+            "crop_size": (crop_h, crop_w)
+        })
+
+    if len(crop_tensors) == 0:
+        return final_mask
+
+    batch_tensor = torch.cat(crop_tensors, dim=0)
+
+    pred = unet_model(batch_tensor)
+    prob = torch.sigmoid(pred)
+    pred_masks = (prob > args.unet_threshold).float()
+    pred_masks = pred_masks[:, 0].cpu().numpy().astype(np.uint8)
+
+    for pred_mask, meta in zip(pred_masks, crop_meta):
+        cls = meta["class"]
+        x1, y1, x2, y2 = meta["box"]
+        crop_h, crop_w = meta["crop_size"]
+
         pred_restore = cv2.resize(
             pred_mask,
             (crop_w, crop_h),
@@ -68,9 +88,9 @@ def unet_from_yolo_detections(
         if pred_restore.sum() == 0:
             continue
 
-        # 최종 mask는 artery=1, vein=2로 저장하여 feature 추출과 시각화에서 동일하게 사용
         if cls == args.class_artery:
             final_mask[y1:y2, x1:x2][pred_restore == 1] = 1
+
         elif cls == args.class_vein:
             final_mask[y1:y2, x1:x2][pred_restore == 1] = 2
 
