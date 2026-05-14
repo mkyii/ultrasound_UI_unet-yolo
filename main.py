@@ -1,3 +1,4 @@
+import os
 import cv2
 import time
 import queue
@@ -29,6 +30,19 @@ from utils.io import (
 from utils.metric import evaluate_patient_level
 
 
+def save_mask_npy(final_mask, folder, fname, args):
+    if not args.save_npy:
+        return
+
+    patient_npy_dir = os.path.join(args.npy_dir, folder)
+    os.makedirs(patient_npy_dir, exist_ok=True)
+
+    npy_name = os.path.splitext(fname)[0] + ".npy"
+    npy_path = os.path.join(patient_npy_dir, npy_name)
+
+    np.save(npy_path, final_mask.astype(np.uint8))
+
+
 def main():
     args = parse_args()
 
@@ -56,7 +70,6 @@ def main():
     ])
 
     samples_by_folder = collect_samples_by_folder(args.img_dir)
-
     total_samples = sum(len(v) for v in samples_by_folder.values())
 
     print(f"Total samples: {total_samples}")
@@ -92,6 +105,8 @@ def main():
     prev_time = time.time()
     ijv_start_threshold = 1.0
 
+    frame_name_map = {}
+
     for folder, samples in samples_by_folder.items():
         print(f"\n[RESET] New patient/folder: {folder}")
 
@@ -101,7 +116,6 @@ def main():
         ijv_ecc_history = []
         used_result_ids = set()
         majority_prob = 0.0
-
         monitoring_started = False
 
         for fname, img_path in samples:
@@ -112,6 +126,7 @@ def main():
                 continue
 
             frame_id += 1
+            frame_name_map[frame_id] = (folder, fname)
 
             if frame.shape[:2] != (H, W):
                 frame = cv2.resize(frame, (W, H))
@@ -138,8 +153,14 @@ def main():
 
                 used_result_ids.add(result_id)
 
+                result_folder, result_fname = frame_name_map.get(
+                    result_id,
+                    (folder, f"frame_{result_id}")
+                )
+
                 rosc_prob = float(last_result["rosc_prob"])
                 features = last_result["features"]
+                final_mask = last_result["mask"]
 
                 no_detection = len(last_result.get("det_info", [])) == 0
 
@@ -168,7 +189,6 @@ def main():
 
                 frame_pred = int(rosc_prob >= 0.5)
 
-                # warm-up 중에도 ROSC/Arrest classification 결과는 계속 누적한다.
                 prob_history.append(rosc_prob)
                 pred_history.append(frame_pred)
 
@@ -178,15 +198,22 @@ def main():
                 save_dict["rosc_prob"] = rosc_prob
                 save_dict["majority_prob"] = float(majority_prob)
                 save_dict["frame_pred"] = frame_pred
-                save_dict["patient"] = folder
+                save_dict["patient"] = result_folder
                 save_dict["monitoring_started"] = int(monitoring_started)
                 save_dict["warmup"] = int(not monitoring_started)
                 save_dict["ijv_ecc_start_threshold"] = ijv_start_threshold
 
                 save_features_to_csv(
-                    image_name=f"{folder}/{fname}",
+                    image_name=f"{result_folder}/{result_fname}",
                     features_dict=save_dict,
                     csv_path=args.frame_eval_csv_path,
+                )
+
+                save_mask_npy(
+                    final_mask=final_mask,
+                    folder=result_folder,
+                    fname=result_fname,
+                    args=args,
                 )
 
             vis = draw_boxes(frame, det_info)
@@ -201,7 +228,6 @@ def main():
             DBP = -106.75 * CAC + 129.02
             MBP = -146.27 * CAC + 172.25
 
-            # Status 표시만 warm-up 중에는 숨긴다.
             display_prob = majority_prob if monitoring_started else -1.0
 
             banner = make_status_banner(
@@ -248,8 +274,14 @@ def main():
 
             used_result_ids.add(result_id)
 
+            result_folder, result_fname = frame_name_map.get(
+                result_id,
+                (folder, f"remaining_result_{result_id}.png")
+            )
+
             rosc_prob = float(last_result["rosc_prob"])
             features = last_result["features"]
+            final_mask = last_result["mask"]
 
             no_detection = len(last_result.get("det_info", [])) == 0
 
@@ -281,15 +313,22 @@ def main():
             save_dict["rosc_prob"] = rosc_prob
             save_dict["majority_prob"] = float(majority_prob)
             save_dict["frame_pred"] = frame_pred
-            save_dict["patient"] = folder
+            save_dict["patient"] = result_folder
             save_dict["monitoring_started"] = int(monitoring_started)
             save_dict["warmup"] = int(not monitoring_started)
             save_dict["ijv_ecc_start_threshold"] = ijv_start_threshold
 
             save_features_to_csv(
-                image_name=f"{folder}/remaining_result_{result_id}",
+                image_name=f"{result_folder}/{result_fname}",
                 features_dict=save_dict,
                 csv_path=args.frame_eval_csv_path,
+            )
+
+            save_mask_npy(
+                final_mask=final_mask,
+                folder=result_folder,
+                fname=result_fname,
+                args=args,
             )
 
         save_patient_result(
@@ -309,6 +348,9 @@ def main():
     print(f"Saved video: {args.video_out_path}")
     print(f"Saved frame-level CSV: {args.frame_eval_csv_path}")
     print(f"Saved patient-level CSV: {args.patient_eval_csv_path}")
+
+    if args.save_npy:
+        print(f"Saved npy masks: {args.npy_dir}")
 
     evaluate_patient_level(
         csv_path=args.patient_eval_csv_path,
